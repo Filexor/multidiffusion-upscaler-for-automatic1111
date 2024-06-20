@@ -275,8 +275,13 @@ class AbstractDiffusion:
                     # we simulate the batched behavior and compute all the tensors in one go.
                     if tensor.shape[1] == uncond.shape[1]:
                         # When our prompt tensor is with equal length, we can directly their code.
+                        vcond = None
                         if not self.is_edit_model:
-                            cond = torch.cat([tensor, uncond])
+                            if isinstance(tensor, dict):
+                                cond = torch.cat([tensor['crossattn'], uncond['crossattn']])
+                                vcond = torch.cat([tensor['vector'], uncond['vector']])
+                            else:
+                                cond = torch.cat([tensor, uncond])
                         else:
                             cond = torch.cat([tensor, uncond, uncond])
                         self.set_custom_controlnet_tensors(bbox_id, x_tile.shape[0])
@@ -284,7 +289,7 @@ class AbstractDiffusion:
                         return forward_func(
                             x_tile, 
                             sigma_in, 
-                            cond=self.make_cond_dict(original_cond, cond, image_cond_in),
+                            cond=self.make_cond_dict(original_cond, cond, image_cond_in, vcond),
                         )
                     else:
                         # When not, we need to pass the tensor to UNet separately.
