@@ -25,12 +25,15 @@ class ComparableEnum(Enum):
     def __eq__(self, other: Any) -> bool:
         if   isinstance(other, str):            return self.value == other
         elif isinstance(other, ComparableEnum): return self.value == other.value
-        else: raise TypeError(f'unsupported type: {type(other)}')    
+        else: raise TypeError(f'unsupported type: {type(other)}')
 
 class Method(ComparableEnum):
 
     MULTI_DIFF = 'MultiDiffusion'
     MIX_DIFF   = 'Mixture of Diffusers'
+
+class Method_2(ComparableEnum):
+    DEMO_FU = "DemoFusion"
 
 class BlendMode(Enum):  # i.e. LayerType
 

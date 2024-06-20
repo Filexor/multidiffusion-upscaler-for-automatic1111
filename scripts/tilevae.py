@@ -61,7 +61,7 @@ import gradio as gr
 
 import modules.scripts as scripts
 import modules.devices as devices
-from modules.shared import state
+from modules.shared import state, opts
 from modules.ui import gr_show
 from modules.processing import opt_f
 from modules.sd_vae_approx import cheap_approximation
@@ -69,6 +69,11 @@ from ldm.modules.diffusionmodules.model import AttnBlock, MemoryEfficientAttnBlo
 
 from tile_utils.attn import get_attn_func
 from tile_utils.typing import Processing
+
+if hasattr(opts, 'hypertile_enable_unet'):  # webui >= 1.7
+    from modules.ui_components import InputAccordion
+else:
+    InputAccordion = None
 
 
 def get_rcmd_enc_tsize():
@@ -508,6 +513,7 @@ class VAEHook:
         @return: image
         """
         device = next(self.net.parameters()).device
+        dtype = next(self.net.parameters()).dtype
         net = self.net
         tile_size = self.tile_size
         is_decoder = self.is_decoder
@@ -647,7 +653,7 @@ class VAEHook:
 
         # Done!
         pbar.close()
-        return result if result is not None else result_approx.to(device)
+        return result.to(dtype) if result is not None else result_approx.to(device, dtype=dtype)
 
 
 class Script(scripts.Script):
@@ -665,9 +671,14 @@ class Script(scripts.Script):
         tab = 't2i' if not is_img2img else 'i2i'
         uid = lambda name: f'MD-{tab}-{name}'
 
-        with gr.Accordion('Tiled VAE', open=False, elem_id=f'MDV-{tab}'):
+        with (
+            InputAccordion(False, label='Tiled VAE', elem_id=f'MDV-{tab}-enabled') if InputAccordion
+            else gr.Accordion('Tiled VAE', open=False, elem_id=f'MDV-{tab}')
+            as enabled
+        ):
             with gr.Row() as tab_enable:
-                enabled = gr.Checkbox(label='Enable Tiled VAE', value=False, elem_id=uid('enable'))
+                if not InputAccordion:
+                    enabled = gr.Checkbox(label='Enable Tiled VAE', value=False, elem_id=uid('enable'))
                 vae_to_gpu = gr.Checkbox(label='Move VAE to GPU (if possible)', value=True, elem_id=uid('vae2gpu'))
 
             gr.HTML('<p style="margin-bottom:0.8em"> Recommended to set tile sizes as large as possible before got CUDA error: out of memory. </p>')
