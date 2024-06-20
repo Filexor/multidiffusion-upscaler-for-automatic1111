@@ -67,11 +67,16 @@ def build_bbox_settings_from_Prompt(p:Processing) -> Dict[int, BBoxSettings]:
     bboxes_p = re.split(r"\sBBOX\s", p.prompt)
     bboxes_n = re.split(r"\sBBOX\s", p.negative_prompt)
     if len(bboxes_p) < len(bboxes_n):
-        bboxes_p[len(bboxes_p):len(bboxes_n)] = ""
+        bboxes_p[len(bboxes_p):len(bboxes_n)] = [""]
     elif len(bboxes_n) < len(bboxes_p):
-        bboxes_n[len(bboxes_n):len(bboxes_p)] = ""
+        bboxes_n[len(bboxes_n):len(bboxes_p)] = [""]
     for i in range(1, len(bboxes_p)):
         prompt = re.match(r"^(.*?)(?:\s(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED)|$)", bboxes_p[i])
+        if prompt is None:
+            prompt = ""
+        else:
+            prompt:Match
+            prompt = prompt.group(1)
         neg_prompt = bboxes_n[i]
         x = re.match(r"\s+POSX\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED)|\s+$|$)", bboxes_p[i])
         if x is None:
