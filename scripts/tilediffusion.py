@@ -141,6 +141,7 @@ class Script(scripts.Script):
                 with gr.Accordion('Region Prompt Control', open=False):
                     with gr.Row(variant='compact'):
                         enable_bbox_control = gr.Checkbox(label='Enable Control', value=False, elem_id=uid('enable-bbox-control'))
+                        bbox_from_prompt = gr.Checkbox(label='Get Region Prompt Control from Main Prompt', value=False, elem_id=uid('bbox_from_prompt'))
                         draw_background = gr.Checkbox(label='Draw full canvas background', value=False, elem_id=uid('draw-background'))
                         causal_layers = gr.Checkbox(label='Causalize layers', value=False, visible=False, elem_id='MD-causal-layers')   # NOTE: currently not used
 
@@ -241,7 +242,7 @@ class Script(scripts.Script):
             upscaler_name, scale_factor,
             noise_inverse, noise_inverse_steps, noise_inverse_retouch, noise_inverse_renoise_strength, noise_inverse_renoise_kernel,
             control_tensor_cpu,
-            enable_bbox_control, draw_background, causal_layers,
+            enable_bbox_control, bbox_from_prompt, draw_background, causal_layers,
             *bbox_controls,
         ]
 
@@ -252,7 +253,7 @@ class Script(scripts.Script):
             upscaler_name: str, scale_factor: float,
             noise_inverse: bool, noise_inverse_steps: int, noise_inverse_retouch: float, noise_inverse_renoise_strength: float, noise_inverse_renoise_kernel: int,
             control_tensor_cpu: bool, 
-            enable_bbox_control: bool, draw_background: bool, causal_layers: bool, 
+            enable_bbox_control: bool, bbox_from_prompt: bool, draw_background: bool, causal_layers: bool, 
             *bbox_control_states: List[Any],
         ):
 
@@ -307,7 +308,13 @@ class Script(scripts.Script):
             print("[Tiled Diffusion] ignore tiling when there's only 1 tile or nothing to do :)")
             return
 
-        bbox_settings = build_bbox_settings(bbox_control_states) if enable_bbox_control else {}
+        if enable_bbox_control:
+            if bbox_from_prompt:
+                bbox_settings = build_bbox_settings_from_Prompt(p)
+            else:
+                bbox_settings = build_bbox_settings(bbox_control_states)
+        else:
+            bbox_settings = {}
 
         if 'png info':
             info = {}
