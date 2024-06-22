@@ -70,42 +70,42 @@ def build_bbox_settings_from_Prompt(p:Processing) -> Dict[int, BBoxSettings]:
     bboxes_p = re.split(r"\sBBOX\s", p.prompt)
     bboxes_n = re.split(r"\sBBOX\s", p.negative_prompt)
     if len(bboxes_p) < len(bboxes_n):
-        bboxes_p[len(bboxes_p):len(bboxes_n)] = [""]
+        bboxes_p.extend([""] * (len(bboxes_n) - len(bboxes_p)))
     elif len(bboxes_n) < len(bboxes_p):
-        bboxes_n[len(bboxes_n):len(bboxes_p)] = [""]
+        bboxes_n.extend([""] * (len(bboxes_p) - len(bboxes_n)))
     for i in range(1, len(bboxes_p)):
-        prompt = re.match(r"^(.*?)(?:\s(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED)|$)", bboxes_p[i])
+        prompt = re.match(r"^(.*?)(?:\s(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED).*|$)", bboxes_p[i])
         if prompt is None:
             prompt = ""
         else:
             prompt:Match
             prompt = prompt.group(1)
         neg_prompt = bboxes_n[i]
-        x = re.match(r".*?\s+POSX\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED)|\s+$|$)", bboxes_p[i])
+        x = re.match(r".*?\s+POSX\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED).*|\s+$|$)", bboxes_p[i])
         if x is None:
             x = 0
         else:
             x:Match
             x = eval(x.group(1))
-        y = re.match(r".*?\s+POSY\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED)|\s+$|$)", bboxes_p[i])
+        y = re.match(r".*?\s+POSY\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED).*|\s+$|$)", bboxes_p[i])
         if y is None:
             y = 0
         else:
             y:Match
             y = eval(y.group(1))
-        w = re.match(r".*?\s+WIDTH\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED)|\s+$|$)", bboxes_p[i])
+        w = re.match(r".*?\s+WIDTH\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED).*|\s+$|$)", bboxes_p[i])
         if w is None:
             w = 1
         else:
             w:Match
             w = eval(w.group(1))
-        h = re.match(r".*?\s+HEIGHT\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED)|\s+$|$)", bboxes_p[i])
+        h = re.match(r".*?\s+HEIGHT\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED).*|\s+$|$)", bboxes_p[i])
         if h is None:
             h = 1
         else:
             h:Match
             h = eval(h.group(1))
-        a = re.match(r".*?\s+ANCHOR\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED)|\s+$|$)", bboxes_p[i])
+        a = re.match(r".*?\s+ANCHOR\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED).*|\s+$|$)", bboxes_p[i])
         if a is None:
             a = 7
         else:
@@ -121,24 +121,24 @@ def build_bbox_settings_from_Prompt(p:Processing) -> Dict[int, BBoxSettings]:
             y = y - h / 2
         elif (a - 1) // 3 == 0:
             y = y - h
-        b = re.match(r"\.*?s+BLEND\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED)|\s+$|$)", bboxes_p[i])
+        b = re.match(r".*?\s+BLEND\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED).*|\s+$|$)", bboxes_p[i])
         if b is None:
             b = BlendMode.BACKGROUND.value
         else:
             b:Match
             b = b.group(1)
             b:str
-            if b.lower() in ['foreground', 'fg']:
+            if b.strip().lower() in ['foreground', 'fg']:
                 b = BlendMode.FOREGROUND.value
             else:
                 b = BlendMode.BACKGROUND.value
-        f = re.match(r".*?\s+FEATHER\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED)|\s+$|$)", bboxes_p[i])
+        f = re.match(r".*?\s+FEATHER\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED).*|\s+$|$)", bboxes_p[i])
         if f is None:
             f = 0
         else:
             f:Match
             f = eval(f.group(1))
-        s = re.match(r".*?\s+SEED\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED)|\s+$|$)", bboxes_p[i])
+        s = re.match(r".*?\s+SEED\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED).*|\s+$|$)", bboxes_p[i])
         if s is None:
             s = 0
         else:
@@ -231,9 +231,9 @@ class Condition:
         return uncond
 
     @staticmethod
-    def reconstruct_cond(cond:Cond, step:int) -> Tensor:
-        list_of_what, tensor = prompt_parser.reconstruct_multicond_batch(cond, step)
-        return tensor
+    def reconstruct_cond(cond:Cond, step:int) -> Tuple[list[list], Tensor]:
+        conds_list, tensor = prompt_parser.reconstruct_multicond_batch(cond, step)
+        return conds_list, tensor
 
     def reconstruct_uncond(uncond:Uncond, step:int) -> Tensor:
         tensor = prompt_parser.reconstruct_cond_batch(uncond, step)

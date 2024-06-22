@@ -1,5 +1,28 @@
 from tile_utils.utils import *
 
+from modules.script_callbacks import CFGDenoiserParams, cfg_denoiser_callback
+from modules.script_callbacks import CFGDenoisedParams, cfg_denoised_callback
+from modules.script_callbacks import AfterCFGCallbackParams, cfg_after_cfg_callback
+
+def catenate_conds(conds):
+    if not isinstance(conds[0], dict):
+        return torch.cat(conds)
+
+    return {key: torch.cat([x[key] for x in conds]) for key in conds[0].keys()}
+
+
+def subscript_cond(cond, a, b):
+    if not isinstance(cond, dict):
+        return cond[a:b]
+
+    return {key: vec[a:b] for key, vec in cond.items()}
+
+def pad_cond(tensor, repeats, empty):
+    if not isinstance(tensor, dict):
+        return torch.cat([tensor, empty.repeat((tensor.shape[0], repeats, 1))], axis=1)
+
+    tensor['crossattn'] = pad_cond(tensor['crossattn'], repeats, empty)
+    return tensor
 
 class AbstractDiffusion:
 
@@ -238,9 +261,65 @@ class AbstractDiffusion:
             image_conditioning = icond
 
         sampler_step = self.sampler.model_wrap_cfg.step
-        tensor = Condition.reconstruct_cond(custom_cond, sampler_step)
+        conds_list, tensor = Condition.reconstruct_cond(custom_cond, sampler_step)
         custom_uncond = Condition.reconstruct_uncond(custom_uncond, sampler_step)
-        return tensor, custom_uncond, image_conditioning
+        return conds_list, tensor, custom_uncond, image_conditioning
+    
+    def pad_cond_uncond(self, cond, uncond):
+        empty = shared.sd_model.cond_stage_model_empty_prompt
+        num_repeats = (cond.shape[1] - uncond.shape[1]) // empty.shape[1]
+
+        if num_repeats < 0:
+            cond = pad_cond(cond, -num_repeats, empty)
+            self.padded_cond_uncond = True
+        elif num_repeats > 0:
+            uncond = pad_cond(uncond, num_repeats, empty)
+            self.padded_cond_uncond = True
+
+        return cond, uncond
+
+    def pad_cond_uncond_v0(self, cond, uncond):
+        """
+        Pads the 'uncond' tensor to match the shape of the 'cond' tensor.
+
+        If 'uncond' is a dictionary, it is assumed that the 'crossattn' key holds the tensor to be padded.
+        If 'uncond' is a tensor, it is padded directly.
+
+        If the number of columns in 'uncond' is less than the number of columns in 'cond', the last column of 'uncond'
+        is repeated to match the number of columns in 'cond'.
+
+        If the number of columns in 'uncond' is greater than the number of columns in 'cond', 'uncond' is truncated
+        to match the number of columns in 'cond'.
+
+        Args:
+            cond (torch.Tensor or DictWithShape): The condition tensor to match the shape of 'uncond'.
+            uncond (torch.Tensor or DictWithShape): The tensor to be padded, or a dictionary containing the tensor to be padded.
+
+        Returns:
+            tuple: A tuple containing the 'cond' tensor and the padded 'uncond' tensor.
+
+        Note:
+            This is the padding that was always used in DDIM before version 1.6.0
+        """
+
+        is_dict_cond = isinstance(uncond, dict)
+        uncond_vec = uncond['crossattn'] if is_dict_cond else uncond
+
+        if uncond_vec.shape[1] < cond.shape[1]:
+            last_vector = uncond_vec[:, -1:]
+            last_vector_repeated = last_vector.repeat([1, cond.shape[1] - uncond_vec.shape[1], 1])
+            uncond_vec = torch.hstack([uncond_vec, last_vector_repeated])
+            self.padded_cond_uncond_v0 = True
+        elif uncond_vec.shape[1] > cond.shape[1]:
+            uncond_vec = uncond_vec[:, :cond.shape[1]]
+            self.padded_cond_uncond_v0 = True
+
+        if is_dict_cond:
+            uncond['crossattn'] = uncond_vec
+        else:
+            uncond = uncond_vec
+
+        return cond, uncond
 
     @custom_bbox
     def kdiff_custom_forward(self, x_tile:Tensor, sigma_in:Tensor, original_cond:CondDict, bbox_id:int, bbox:CustomBBox, forward_func:Callable) -> Tensor:
@@ -249,6 +328,8 @@ class AbstractDiffusion:
         We need to unwrap the inside loop to simulate the batched behavior.
         This can be extremely tricky.
         '''
+
+        s_min_uncond = 0
 
         sampler_step = self.sampler.model_wrap_cfg.step
         if self.kdiff_step != sampler_step:
@@ -267,54 +348,143 @@ class AbstractDiffusion:
             # When a new step starts for a bbox, we need to judge whether the tensor is batched.
             self.kdiff_step_bbox[bbox_id] = sampler_step
 
-            tensor, uncond, image_cond_in = self.reconstruct_custom_cond(original_cond, bbox.cond, bbox.uncond, bbox)
+            conds_list, tensor, uncond, image_cond = self.reconstruct_custom_cond(original_cond, bbox.cond, bbox.uncond, bbox)
 
-            if self.real_tensor.shape[1] == self.real_uncond.shape[1]:
-                if shared.batch_cond_uncond:
-                    # when the real tensor is with equal length, all information is contained in x_tile.
-                    # we simulate the batched behavior and compute all the tensors in one go.
-                    if tensor.shape[1] == uncond.shape[1]:
-                        # When our prompt tensor is with equal length, we can directly their code.
-                        vcond = None
-                        if not self.is_edit_model:
-                            if isinstance(tensor, dict):
-                                cond = torch.cat([tensor['crossattn'], uncond['crossattn']])
-                                vcond = torch.cat([tensor['vector'], uncond['vector']])
-                            else:
-                                cond = torch.cat([tensor, uncond])
-                        else:
-                            cond = torch.cat([tensor, uncond, uncond])
-                        self.set_custom_controlnet_tensors(bbox_id, x_tile.shape[0])
-                        self.set_custom_stablesr_tensors(bbox_id)
-                        return forward_func(
-                            x_tile, 
-                            sigma_in, 
-                            cond=self.make_cond_dict(original_cond, cond, image_cond_in, vcond),
-                        )
-                    else:
-                        # When not, we need to pass the tensor to UNet separately.
-                        x_out = torch.zeros_like(x_tile)
-                        cond_size = tensor.shape[0]
-                        self.set_custom_controlnet_tensors(bbox_id, cond_size)
-                        self.set_custom_stablesr_tensors(bbox_id)
-                        cond_out = forward_func(
-                            x_tile  [:cond_size], 
-                            sigma_in[:cond_size], 
-                            cond=self.make_cond_dict(original_cond, tensor, image_cond_in[:cond_size]),
-                        )
-                        uncond_size = uncond.shape[0]
-                        self.set_custom_controlnet_tensors(bbox_id, uncond_size)
-                        self.set_custom_stablesr_tensors(bbox_id)
-                        uncond_out = forward_func(
-                            x_tile  [cond_size:cond_size+uncond_size], 
-                            sigma_in[cond_size:cond_size+uncond_size], 
-                            cond=self.make_cond_dict(original_cond, uncond, image_cond_in[cond_size:cond_size+uncond_size]),
-                        )
-                        x_out[:cond_size] = cond_out
-                        x_out[cond_size:cond_size+uncond_size] = uncond_out
-                        if self.is_edit_model:
-                            x_out[cond_size+uncond_size:] = uncond_out
+            batch_size = len(conds_list)
+            repeats = [len(conds_list[i]) for i in range(batch_size)]
+
+            if shared.sd_model.model.conditioning_key == "crossattn-adm":
+                image_uncond = torch.zeros_like(image_cond)
+                make_condition_dict = lambda c_crossattn, c_adm: {"c_crossattn": [c_crossattn], "c_adm": c_adm}
+            else:
+                image_uncond = image_cond
+                if isinstance(uncond, dict):
+                    make_condition_dict = lambda c_crossattn, c_concat: {**c_crossattn, "c_concat": [c_concat]}
+                else:
+                    make_condition_dict = lambda c_crossattn, c_concat: {"c_crossattn": [c_crossattn], "c_concat": [c_concat]}
+
+            is_edit_model = shared.sd_model.cond_stage_key == "edit" and self.image_cfg_scale is not None and self.image_cfg_scale != 1.0
+
+            if not is_edit_model:
+                x_in = torch.cat([torch.stack([x_tile[i] for _ in range(n)]) for i, n in enumerate(repeats)] + [x_tile[0:1]])
+                sigma_in = torch.cat([torch.stack([sigma_in[i] for _ in range(n)]) for i, n in enumerate(repeats)] + [sigma_in[0:1]])
+                image_cond_in = torch.cat([torch.stack([image_cond[i] for _ in range(n)]) for i, n in enumerate(repeats)] + [image_uncond[0:1]])
+            else:
+                x_in = torch.cat([torch.stack([x_tile[i] for _ in range(n)]) for i, n in enumerate(repeats)] + [x_tile] + [x_tile])
+                sigma_in = torch.cat([torch.stack([sigma_in[i] for _ in range(n)]) for i, n in enumerate(repeats)] + [sigma_in] + [sigma_in])
+                image_cond_in = torch.cat([torch.stack([image_cond[i] for _ in range(n)]) for i, n in enumerate(repeats)] + [image_uncond] + [torch.zeros_like(self.init_latent)])
+
+            denoiser_params = CFGDenoiserParams(x_in, image_cond_in, sigma_in, state.sampling_step, state.sampling_steps, tensor, uncond, self)
+            cfg_denoiser_callback(denoiser_params)
+            x_in = denoiser_params.x
+            image_cond_in = denoiser_params.image_cond
+            sigma_in = denoiser_params.sigma
+            tensor = denoiser_params.text_cond
+            uncond = denoiser_params.text_uncond
+            skip_uncond = False
+
+            # if shared.opts.skip_early_cond != 0. and self.step / self.total_steps <= shared.opts.skip_early_cond:
+            #     skip_uncond = True
+            #     self.p.extra_generation_params["Skip Early CFG"] = shared.opts.skip_early_cond
+            # elif (self.step % 2 or shared.opts.s_min_uncond_all) and s_min_uncond > 0 and sigma_in[0] < s_min_uncond and not is_edit_model:
+            #     skip_uncond = True
+            #     self.p.extra_generation_params["NGMS"] = s_min_uncond
+            #     if shared.opts.s_min_uncond_all:
+            #         self.p.extra_generation_params["NGMS all steps"] = shared.opts.s_min_uncond_all
+
+            if skip_uncond:
+                x_in = x_in[:-batch_size]
+                sigma_in = sigma_in[:-batch_size]
+
+            self.padded_cond_uncond = False
+            self.padded_cond_uncond_v0 = False
+            if shared.opts.pad_cond_uncond_v0 and tensor.shape[1] != uncond.shape[1]:
+                tensor, uncond = self.pad_cond_uncond_v0(tensor, uncond)
+            elif shared.opts.pad_cond_uncond and tensor.shape[1] != uncond.shape[1]:
+                tensor, uncond = self.pad_cond_uncond(tensor, uncond)
+
+            if tensor.shape[1] == uncond.shape[1] or skip_uncond:
+                if is_edit_model:
+                    cond_in = catenate_conds([tensor, uncond, uncond])
+                elif skip_uncond:
+                    cond_in = tensor
+                else:
+                    cond_in = catenate_conds([tensor, uncond])
+
+                if shared.opts.batch_cond_uncond:
+                    x_out = forward_func(x_in, sigma_in, cond=make_condition_dict(cond_in, image_cond_in))
+                    return x_out
+                else:
+                    x_out = torch.zeros_like(x_in)
+                    for batch_offset in range(0, x_out.shape[0], batch_size):
+                        a = batch_offset
+                        b = a + batch_size
+                        x_out[a:b] = forward_func(x_in[a:b], sigma_in[a:b], cond=make_condition_dict(subscript_cond(cond_in, a, b), image_cond_in[a:b]))
                         return x_out
+            else:
+                x_out = torch.zeros_like(x_in)
+                batch_size = batch_size*2 if shared.opts.batch_cond_uncond else batch_size
+                for batch_offset in range(0, tensor.shape[0], batch_size):
+                    a = batch_offset
+                    b = min(a + batch_size, tensor.shape[0])
+
+                    if not is_edit_model:
+                        c_crossattn = subscript_cond(tensor, a, b)
+                    else:
+                        c_crossattn = torch.cat([tensor[a:b]], uncond)
+
+                    x_out[a:b] = forward_func(x_in[a:b], sigma_in[a:b], cond=make_condition_dict(c_crossattn, image_cond_in[a:b]))
+                    return x_out
+
+                if not skip_uncond:
+                    x_out[-uncond.shape[0]:] = forward_func(x_in[-uncond.shape[0]:], sigma_in[-uncond.shape[0]:], cond=make_condition_dict(uncond, image_cond_in[-uncond.shape[0]:]))
+                    return x_out
+
+            # if self.real_tensor.shape[1] == self.real_uncond.shape[1]:
+            #     if shared.batch_cond_uncond:
+            #         # when the real tensor is with equal length, all information is contained in x_tile.
+            #         # we simulate the batched behavior and compute all the tensors in one go.
+            #         if tensor.shape[1] == uncond.shape[1]:
+            #             # When our prompt tensor is with equal length, we can directly their code.
+            #             vcond = None
+            #             if not self.is_edit_model:
+            #                 if isinstance(uncond, dict):
+            #                     make_condition_dict = lambda c_crossattn, c_concat: {**c_crossattn, "c_concat": [c_concat]}
+            #                 else:
+            #                     make_condition_dict = lambda c_crossattn, c_concat: {"c_crossattn": [c_crossattn], "c_concat": [c_concat]}
+            #             else:
+            #                 cond = torch.cat([tensor, uncond, uncond])
+            #             self.set_custom_controlnet_tensors(bbox_id, x_tile.shape[0])
+            #             self.set_custom_stablesr_tensors(bbox_id)
+            #             return forward_func(
+            #                 x_tile, 
+            #                 sigma_in, 
+            #                 cond=self.make_cond_dict(original_cond, cond, image_cond_in, vcond),
+            #             )
+            #         else:
+            #             # When not, we need to pass the tensor to UNet separately.
+            #             x_out = torch.zeros_like(x_tile)
+            #             cond_size = tensor.shape[0]
+            #             self.set_custom_controlnet_tensors(bbox_id, cond_size)
+            #             self.set_custom_stablesr_tensors(bbox_id)
+            #             cond_out = forward_func(
+            #                 x_tile  [:cond_size], 
+            #                 sigma_in[:cond_size], 
+            #                 cond=self.make_cond_dict(original_cond, tensor, image_cond_in[:cond_size]),
+            #             )
+            #             uncond_size = uncond.shape[0]
+            #             self.set_custom_controlnet_tensors(bbox_id, uncond_size)
+            #             self.set_custom_stablesr_tensors(bbox_id)
+            #             uncond_out = forward_func(
+            #                 x_tile  [cond_size:cond_size+uncond_size], 
+            #                 sigma_in[cond_size:cond_size+uncond_size], 
+            #                 cond=self.make_cond_dict(original_cond, uncond, image_cond_in[cond_size:cond_size+uncond_size]),
+            #             )
+            #             x_out[:cond_size] = cond_out
+            #             x_out[cond_size:cond_size+uncond_size] = uncond_out
+            #             if self.is_edit_model:
+            #                 x_out[cond_size+uncond_size:] = uncond_out
+            #             return x_out
                 
             # otherwise, the x_tile is only a partial batch. 
             # We have to denoise in different runs.
