@@ -40,9 +40,16 @@ class BlendMode(Enum):  # i.e. LayerType
     FOREGROUND = 'Foreground'
     BACKGROUND = 'Background'
 
-BBoxSettings = namedtuple('BBoxSettings', ['enable', 'x', 'y', 'w', 'h', 'prompt', 'neg_prompt', 'blend_mode', 'feather_ratio', 'seed'])
+class FuseMethod(Enum):
+
+    AND = 'AND'
+    AND_PERP = 'AND_PERP'
+    AND_SALT = 'AND_SALT'
+    AND_TOPK = 'AND_TOPK'
+
+BBoxSettings = namedtuple('BBoxSettings', ['enable', 'x', 'y', 'w', 'h', 'prompt', 'neg_prompt', 'blend_mode', 'feather_ratio', 'seed', 'fuse_method', 'topk_cutoff', 'fuse_weight'])
 NoiseInverseCache = namedtuple('NoiseInversionCache', ['model_hash', 'x0', 'xt', 'noise_inversion_steps', 'retouch', 'prompts'])
-DEFAULT_BBOX_SETTINGS = BBoxSettings(False, 0.4, 0.4, 0.2, 0.2, '', '', BlendMode.BACKGROUND.value, 0.2, -1)
+DEFAULT_BBOX_SETTINGS = BBoxSettings(False, 0.4, 0.4, 0.2, 0.2, '', '', BlendMode.BACKGROUND.value, 0.2, -1, 'AND', 0.05, 1.0)
 NUM_BBOX_PARAMS = len(BBoxSettings._fields)
 
 
@@ -67,49 +74,49 @@ def build_bbox_settings(bbox_control_states:List[Any]) -> Dict[int, BBoxSettings
 def build_bbox_settings_from_Prompt(p:Processing) -> Dict[int, BBoxSettings]:
     random.seed(p.seed)
     settings = {}
-    bboxes_p = re.split(r"\sBBOX\s", p.prompt)
-    bboxes_n = re.split(r"\sBBOX\s", p.negative_prompt)
+    bboxes_p = re.split(r"\sBBOX\s", p.all_prompts[0])
+    bboxes_n = re.split(r"\sBBOX\s", p.all_negative_prompts[0])
     if len(bboxes_p) < len(bboxes_n):
         bboxes_p.extend([""] * (len(bboxes_n) - len(bboxes_p)))
     elif len(bboxes_n) < len(bboxes_p):
         bboxes_n.extend([""] * (len(bboxes_p) - len(bboxes_n)))
     for i in range(1, len(bboxes_p)):
-        prompt = re.match(r"^(.*?)(?:\s(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED).*|$)", bboxes_p[i])
+        prompt = re.match(r"^(.*?)(?:\s(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED|FUSE|CUTOFF|WEIGHT).*|$)", bboxes_p[i])
         if prompt is None:
             prompt = ""
         else:
-            prompt:Match
+            prompt: Match
             prompt = prompt.group(1)
         neg_prompt = bboxes_n[i]
-        x = re.match(r".*?\s+POSX\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED).*|\s+$|$)", bboxes_p[i])
+        x = re.match(r".*?\s+POSX\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED|FUSE|CUTOFF|WEIGHT).*|\s+$|$)", bboxes_p[i])
         if x is None:
             x = 0
         else:
-            x:Match
+            x :Match
             x = eval(x.group(1))
-        y = re.match(r".*?\s+POSY\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED).*|\s+$|$)", bboxes_p[i])
+        y = re.match(r".*?\s+POSY\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED|FUSE|CUTOFF|WEIGHT).*|\s+$|$)", bboxes_p[i])
         if y is None:
             y = 0
         else:
-            y:Match
+            y: Match
             y = eval(y.group(1))
-        w = re.match(r".*?\s+WIDTH\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED).*|\s+$|$)", bboxes_p[i])
+        w = re.match(r".*?\s+WIDTH\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED|FUSE|CUTOFF|WEIGHT).*|\s+$|$)", bboxes_p[i])
         if w is None:
             w = 1
         else:
-            w:Match
+            w: Match
             w = eval(w.group(1))
-        h = re.match(r".*?\s+HEIGHT\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED).*|\s+$|$)", bboxes_p[i])
+        h = re.match(r".*?\s+HEIGHT\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED|FUSE|CUTOFF|WEIGHT).*|\s+$|$)", bboxes_p[i])
         if h is None:
             h = 1
         else:
-            h:Match
+            h: Match
             h = eval(h.group(1))
-        a = re.match(r".*?\s+ANCHOR\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED).*|\s+$|$)", bboxes_p[i])
+        a = re.match(r".*?\s+ANCHOR\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED|FUSE|CUTOFF|WEIGHT).*|\s+$|$)", bboxes_p[i])
         if a is None:
             a = 7
         else:
-            a:Match
+            a: Match
             a = eval(a.group(1))
         if a not in [1,2,3,4,5,6,7,8,9]:
             a = 7
@@ -121,30 +128,53 @@ def build_bbox_settings_from_Prompt(p:Processing) -> Dict[int, BBoxSettings]:
             y = y - h / 2
         elif (a - 1) // 3 == 0:
             y = y - h
-        b = re.match(r".*?\s+BLEND\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED).*|\s+$|$)", bboxes_p[i])
+        b = re.match(r".*?\s+BLEND\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED|FUSE|CUTOFF|WEIGHT).*|\s+$|$)", bboxes_p[i])
         if b is None:
             b = BlendMode.BACKGROUND.value
         else:
-            b:Match
+            b: Match
             b = b.group(1)
             b:str
             if b.strip().lower() in ['foreground', 'fg']:
                 b = BlendMode.FOREGROUND.value
             else:
                 b = BlendMode.BACKGROUND.value
-        f = re.match(r".*?\s+FEATHER\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED).*|\s+$|$)", bboxes_p[i])
+        f = re.match(r".*?\s+FEATHER\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED|FUSE|CUTOFF|WEIGHT).*|\s+$|$)", bboxes_p[i])
         if f is None:
             f = 0
         else:
-            f:Match
+            f: Match
             f = eval(f.group(1))
-        s = re.match(r".*?\s+SEED\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED).*|\s+$|$)", bboxes_p[i])
+        s = re.match(r".*?\s+SEED\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED|FUSE|CUTOFF|WEIGHT).*|\s+$|$)", bboxes_p[i])
         if s is None:
             s = 0
         else:
-            s:Match
+            s: Match
             s = eval(s.group(1))
-        setting = BBoxSettings(True, x, y, w, h, prompt, neg_prompt, b, f, s)
+        fm = re.match(r".*?\s+FUSE\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED|FUSE|CUTOFF|WEIGHT).*|\s+$|$)", bboxes_p[i]) 
+        if fm is None:
+            fm = FuseMethod.AND.value
+        else:
+            fm: Match
+            fm: str = fm.group(1)
+            if fm.strip().upper() not in [e.value for e in FuseMethod]:
+                fm = FuseMethod.AND.value
+            else:
+                fm = fm.strip().upper()
+        fc = re.match(r".*?\s+CUTOFF\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED|FUSE|CUTOFF|WEIGHT).*|\s+$|$)", bboxes_p[i])
+        if fc is None:
+            fc = 0
+        else:
+            fc: Match
+            fc = eval(s.group(1))
+        fw = re.match(r".*?\s+WEIGHT\s+(.+?)(?:\s+(?:POSX|POSY|WIDTH|HEIGHT|ANCHOR|BLEND|FEATHER|SEED|FUSE|CUTOFF|WEIGHT).*|\s+$|$)", bboxes_p[i])
+        if fw is None:
+            fw = 1
+        else:
+            fw: Match
+            fw = eval(fw.group(1))
+            
+        setting = BBoxSettings(True, x, y, w, h, prompt, neg_prompt, b, f, s, fm, fc, fw)
         settings[i - 1] = setting
     p.prompt = bboxes_p[0]
     p.main_prompt = bboxes_p[0]
@@ -177,13 +207,16 @@ class CustomBBox(BBox):
 
     ''' region control bbox '''
 
-    def __init__(self, x:int, y:int, w:int, h:int, prompt:str, neg_prompt:str, blend_mode:str, feather_radio:float, seed:int):
+    def __init__(self, x:int, y:int, w:int, h:int, prompt:str, neg_prompt:str, blend_mode:str, feather_radio:float, seed:int, fuse_method: str, topk_cutoff: float, fuse_weight: float):
         super().__init__(x, y, w, h)
         self.prompt = prompt
         self.neg_prompt = neg_prompt
         self.blend_mode = BlendMode(blend_mode)
         self.feather_ratio = max(min(feather_radio, 1.0), 0.0)
         self.seed = seed
+        self.fuse_method = fuse_method
+        self.topk_cutoff = max(min(topk_cutoff, 1.0), 0.0)
+        self.fuse_weight = fuse_weight
         # initialize necessary fields
         self.feather_mask = feather_mask(self.w, self.h, self.feather_ratio) if self.blend_mode == BlendMode.FOREGROUND else None
         self.cond: MulticondLearnedConditioning = None
@@ -337,7 +370,6 @@ def get_retouch_mask(img_input: np.ndarray, kernel_size: int) -> np.ndarray:
     gf = gf.clip(0, 255)
     gf = gf.astype(np.float32)/255.0
     return gf
-
 
 def null_decorator(fn):
     def wrapper(*args, **kwargs):

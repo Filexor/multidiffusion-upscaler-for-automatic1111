@@ -212,6 +212,7 @@ class Script(scripts.Script):
 
                             prompt = gr.Text(show_label=False, placeholder=f'Prompt, will append to your {tab} prompt', max_lines=2, elem_id=f'MD-{tab}-{i}-prompt')
                             neg_prompt = gr.Text(show_label=False, placeholder='Negative Prompt, will also be appended', max_lines=1, elem_id=f'MD-{tab}-{i}-neg-prompt')
+
                             with gr.Row(variant='compact'):
                                 seed = gr.Number(label='Seed', value=-1, visible=True, elem_id=f'MD-{tab}-{i}-seed')
                                 random_seed = gr.Button(value='🎲', variant='tool', elem_id=f'MD-{tab}-{i}-random_seed')
@@ -219,7 +220,12 @@ class Script(scripts.Script):
                                 random_seed.click(fn=lambda: -1, outputs=seed, show_progress=False)
                                 reuse_seed.click(fn=None, inputs=seed, outputs=seed, _js=f'e => getSeedInfo({is_t2i}, {i+1}, e)', show_progress=False)
 
-                        control = [e, x, y, w, h, prompt, neg_prompt, blend_mode, feather_ratio, seed]
+                            with gr.Row(variant='compact'):
+                                fuse_method = gr.Dropdown(label='Fuse Method', choices=[e.value for e in FuseMethod], value='AND', visible=True, elem_id=f'MD-{tab}-{i}-fuse-method')
+                                topk_cutoff = gr.Slider(label='TOPK Filter Cutoff', value=0.05, minimum=0.0, maximum=1.0, step=0.0001, visible=False, elem_id=f'MD-{tab}-{i}-topk-cutoff')
+                                fuse_weight = gr.Number(label='Fuse Weight', value=1, visible=True, elem_id=f'MD-{tab}-{i}-fuse-weight')
+
+                        control = [e, x, y, w, h, prompt, neg_prompt, blend_mode, feather_ratio, seed, fuse_method, topk_cutoff, fuse_weight]
                         assert len(control) == NUM_BBOX_PARAMS
                         bbox_controls.extend(control)
 

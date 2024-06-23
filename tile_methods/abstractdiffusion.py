@@ -225,7 +225,7 @@ class AbstractDiffusion:
 
         self.custom_bboxes: List[CustomBBox] = []
         for bbox_setting in bbox_settings.values():
-            e, x, y, w, h, p, n, blend_mode, feather_ratio, seed = bbox_setting
+            e, x, y, w, h, p, n, blend_mode, feather_ratio, seed, fuse_method, topk_cutoff, fuse_weight = bbox_setting
             if not e or x > 1.0 or y > 1.0 or w <= 0.0 or h <= 0.0: continue
             x = int(x * self.w)
             y = int(y * self.h)
@@ -235,7 +235,7 @@ class AbstractDiffusion:
             y = max(0, y)
             w = min(self.w - x, w)
             h = min(self.h - y, h)
-            self.custom_bboxes.append(CustomBBox(x, y, w, h, p, n, blend_mode, feather_ratio, seed))
+            self.custom_bboxes.append(CustomBBox(x, y, w, h, p, n, blend_mode, feather_ratio, seed, fuse_method, topk_cutoff, fuse_weight))
 
         if len(self.custom_bboxes) == 0:
             self.enable_custom_bbox = False

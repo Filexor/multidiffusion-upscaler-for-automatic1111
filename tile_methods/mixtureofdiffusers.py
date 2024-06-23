@@ -49,7 +49,7 @@ class MixtureOfDiffusers(AbstractDiffusion):
         for bbox in self.custom_bboxes:
             if bbox.blend_mode == BlendMode.BACKGROUND:
                 custom_weights = self.get_weight(bbox.w, bbox.h)
-                self.weights[bbox.slicer] += custom_weights
+                self.weights[bbox.slicer] += custom_weights * bbox.fuse_weight
                 self.custom_weights.append(custom_weights.unsqueeze(0).unsqueeze(0))
             else:
                 self.custom_weights.append(None)
@@ -128,6 +128,7 @@ class MixtureOfDiffusers(AbstractDiffusion):
                 self.update_pbar()
         
         # Custom region sampling
+        salient_cond_deltas = []
         x_feather_buffer = None
         x_feather_mask   = None
         x_feather_count  = None
@@ -150,7 +151,21 @@ class MixtureOfDiffusers(AbstractDiffusion):
                     x_tile_out = shared.sd_model.apply_model(x_tile, t_in, cond=c_out)
 
                 if bbox.blend_mode == BlendMode.BACKGROUND:
-                    self.x_buffer[bbox.slicer] += x_tile_out * self.custom_weights[bbox_id]
+                    if bbox.fuse_method == FuseMethod.AND_PERP.value:
+                        if (x_tile_out == 0).all():
+                            if shared.state.sampling_step <= 0:
+                                UserWarning('Could not find a projection for one or more AND_PERP prompts\nThese prompts will NOT be made perpendicular')
+                        self.x_buffer[bbox.slicer] += (self.x_buffer[bbox.slicer] - x_tile_out * torch.sum(x_tile_out * self.x_buffer[bbox.slicer]) / torch.norm(x_tile_out) ** 2) * bbox.fuse_weight
+                    elif bbox.fuse_method == FuseMethod.AND_SALT.value:
+                        x_tile_out_extended = torch.zeros_like(self.x_buffer)
+                        x_tile_out_extended[bbox.slicer] = x_tile_out * self.custom_weights[bbox_id]
+                        salient_cond_deltas.append((x_tile_out_extended, bbox.fuse_weight))
+                    elif bbox.fuse_method == FuseMethod.AND_TOPK.value:
+                        k = int(torch.numel(x_tile_out) * (1 - bbox.topk_cutoff))
+                        top_k, _ = torch.kthvalue(torch.abs(torch.flatten(x_tile_out)), k)
+                        self.x_buffer[bbox.slicer] += x_tile_out * (torch.abs(x_tile_out) >= top_k).to(x_tile_out.dtype) * self.custom_weights[bbox_id] * bbox.fuse_weight
+                    else:
+                        self.x_buffer[bbox.slicer] += x_tile_out * self.custom_weights[bbox_id] * bbox.fuse_weight
                 elif bbox.blend_mode == BlendMode.FOREGROUND:
                     if x_feather_buffer is None:
                         x_feather_buffer = torch.zeros_like(self.x_buffer)
@@ -166,7 +181,16 @@ class MixtureOfDiffusers(AbstractDiffusion):
                     with devices.autocast():
                         extra_networks.deactivate(self.p, bbox.extra_network_data)
 
+        # salient_blend
+        salience_maps = [torch.softmax(torch.abs(self.x_buffer).flatten(), dim=0).reshape_as(self.x_buffer)] + [torch.softmax(torch.abs(vector).flatten(), dim=0).reshape_as(vector) for vector, _ in salient_cond_deltas]
+        mask = torch.argmax(torch.stack(salience_maps, dim=0), dim=0)
+
         x_out = self.x_buffer
+        for mask_i, (vector, weight) in enumerate(salient_cond_deltas, start=1):
+            vector_mask = (mask == mask_i).float()
+            x_out += weight * vector_mask * (vector - self.x_buffer)
+
+        # x_out = self.x_buffer
         if x_feather_buffer is not None:
             # Average overlapping feathered regions
             x_feather_buffer = torch.where(x_feather_count > 1, x_feather_buffer / x_feather_count, x_feather_buffer)
